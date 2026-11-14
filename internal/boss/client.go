@@ -103,12 +103,34 @@ func (s *BossService) executeInPage(jsFn string, args ...any) (string, error) {
 		return "", err
 	}
 
-	val, err := page.Eval(jsFn, args...)
-	if err != nil {
-		return "", err
+	// 页面在首次导航后可能发生客户端重定向，导致执行上下文失效 (-32000)。
+	// 此处做有限重试，避免把一次性竞态直接抛给调用方。
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		val, err := page.Eval(jsFn, args...)
+		if err == nil {
+			return val.Value.Str(), nil
+		}
+		lastErr = err
+		if !isContextLost(err) {
+			return "", err
+		}
+		_ = page.WaitLoad()
+		time.Sleep(600 * time.Millisecond)
 	}
 
-	return val.Value.Str(), nil
+	return "", lastErr
+}
+
+// isContextLost 判断是否为页面导航导致的执行上下文失效
+func isContextLost(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "-32000") ||
+		strings.Contains(msg, "navigated") ||
+		strings.Contains(msg, "Execution context was destroyed")
 }
 
 // GetVisibleJobs 读取当前页面上渲染的可见职位列表
