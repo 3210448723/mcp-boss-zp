@@ -66,18 +66,29 @@ func (s *BossService) ensurePageValid() (*rod.Page, error) {
 		log.Println("[BossService] 检测到 BOSS 标签页已关闭或失联，正在重新打开...")
 	}
 
-	p, err := s.bm.NewStealthPage()
+	p, reused, err := s.bm.PageForBoss()
 	if err != nil {
 		return nil, fmt.Errorf("初始化 BOSS 页面失败: %w", err)
 	}
 	s.page = p
 
-	log.Printf("[BossService] 正在打开 BOSS 直聘推荐页: %s", bossJobURL)
-	if err := s.page.Navigate(bossJobURL); err != nil {
-		return nil, fmt.Errorf("页面导航失败: %w", err)
+	if reused {
+		log.Printf("[BossService] 已复用现有 BOSS 标签页")
 	}
 
-	_ = s.page.WaitLoad()
+	// 只有当前不在推荐页时才导航，复用标签页时避免多余刷新
+	currentInfo, err := s.page.Info()
+	if err != nil || !strings.Contains(currentInfo.URL, "/web/geek/job") {
+		log.Printf("[BossService] 正在打开 BOSS 直聘推荐页: %s", bossJobURL)
+		if err := s.page.Navigate(bossJobURL); err != nil {
+			return nil, fmt.Errorf("页面导航失败: %w", err)
+		}
+		_ = s.page.WaitLoad()
+	}
+
+	// 窗口/视口修正必须放在加载完成之后：导航会重置 Emulation 覆盖
+	// 注意该便携 Edge 的真实 OS 窗口会被锁在 1280x800，必须走系统层最大化
+	s.bm.FitWindow(s.page)
 
 	info, err := s.page.Info()
 	if err != nil {

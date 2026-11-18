@@ -17,6 +17,9 @@ type AppConfig struct {
 	GreetMinSec     int    // 两次打招呼的最小间隔（秒）
 	GreetMaxSec     int    // 两次打招呼的最大间隔（秒）
 	GreetDailyLimit int    // 每日打招呼上限
+	ViewportFit     bool   // 视口异常（内容区远小于屏幕）时是否自动铺满屏幕
+	ReuseBossTab    bool   // 是否复用已存在的 BOSS 推荐页标签页
+	MaximizeWindow  bool   // 是否在系统层最大化承载 BOSS 页面的浏览器窗口
 }
 
 // GetDefaultUserDataDir 获取跨平台默认的数据持久化目录
@@ -55,6 +58,14 @@ func envInt(name string, def int) int {
 	return n
 }
 
+func envBool(name string, def bool) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	if v == "" {
+		return def
+	}
+	return !(v == "0" || v == "false" || v == "no" || v == "off")
+}
+
 // LoadConfig 从环境变量加载配置
 func LoadConfig() *AppConfig {
 	headless := false
@@ -77,5 +88,8 @@ func LoadConfig() *AppConfig {
 		GreetMinSec:     minSec,
 		GreetMaxSec:     maxSec,
 		GreetDailyLimit: envInt("BOSS_GREET_DAILY_LIMIT", 30),
+		ViewportFit:     envBool("BOSS_VIEWPORT_FIT", true),
+		ReuseBossTab:    envBool("BOSS_REUSE_TAB", true),
+		MaximizeWindow:  envBool("BOSS_MAXIMIZE", true),
 	}
 }
