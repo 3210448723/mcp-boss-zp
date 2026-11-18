@@ -11,6 +11,7 @@ type AppConfig struct {
 	UserDataDir string // Chrome 用户数据目录
 	Headless    bool   // 是否无头模式
 	ChromeBin   string // 自定义 Chrome/Edge 可执行文件路径
+	CDPURL      string // 复用已运行浏览器的 CDP 地址 (如 http://127.0.0.1:9222)，为空则自行启动浏览器
 }
 
 // GetDefaultUserDataDir 获取跨平台默认的数据持久化目录
@@ -36,5 +37,6 @@ func LoadConfig() *AppConfig {
 		UserDataDir: GetDefaultUserDataDir(),
 		Headless:    headless,
 		ChromeBin:   strings.TrimSpace(os.Getenv("CHROME_BIN")),
+		CDPURL:      strings.TrimSpace(os.Getenv("BOSS_CDP_URL")),
 	}
 }

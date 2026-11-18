@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/go-rod/rod"
@@ -21,9 +22,11 @@ const (
 
 // BrowserManager 管理底层 Chrome/Edge 浏览器进程及连接
 type BrowserManager struct {
-	cfg     *config.AppConfig
-	browser *rod.Browser
-	mu      sync.Mutex
+	cfg      *config.AppConfig
+	browser  *rod.Browser
+	mu       sync.Mutex
+	external bool        // 是否复用外部已运行的浏览器（不负责关闭其进程）
+	pages    []*rod.Page // 本服务打开的页面，退出时统一关闭
 }
 
 // NewBrowserManager 创建通用浏览器管理器
@@ -40,12 +43,41 @@ func cleanStaleLocks(userDataDir string) {
 	}
 }
 
+// resolveCDP 将 "9222" / "127.0.0.1:9222" / "http://127.0.0.1:9222" / "ws://..." 统一解析为 CDP WebSocket 地址
+func resolveCDP(raw string) (string, error) {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return "", fmt.Errorf("CDP 地址为空")
+	}
+	if strings.HasPrefix(v, "ws") {
+		return v, nil
+	}
+	hostPort := strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(v, "http://"), "https://"), "/")
+	return launcher.ResolveURL(hostPort)
+}
+
 // EnsureBrowser 确保底层浏览器已启动并建立连接
 func (bm *BrowserManager) EnsureBrowser() (*rod.Browser, error) {
 	bm.mu.Lock()
 	defer bm.mu.Unlock()
 
 	if bm.browser != nil {
+		return bm.browser, nil
+	}
+
+	// 复用已运行的浏览器（沿用真实登录态，无需重启浏览器）
+	if bm.cfg.CDPURL != "" {
+		u, err := resolveCDP(bm.cfg.CDPURL)
+		if err != nil {
+			return nil, fmt.Errorf("解析 CDP 地址失败 (%s): %w", bm.cfg.CDPURL, err)
+		}
+		b := rod.New().ControlURL(u)
+		if err := b.Connect(); err != nil {
+			return nil, fmt.Errorf("连接已运行的浏览器失败 (请确认浏览器以 --remote-debugging-port 启动且端口可达): %w", err)
+		}
+		log.Printf("[Browser] 已接管正在运行的浏览器: %s", bm.cfg.CDPURL)
+		bm.browser = b
+		bm.external = true
 		return bm.browser, nil
 	}
 
@@ -99,6 +131,10 @@ func (bm *BrowserManager) NewStealthPage() (*rod.Page, error) {
 		return nil, fmt.Errorf("创建 stealth 页面失败: %w", err)
 	}
 
+	bm.mu.Lock()
+	bm.pages = append(bm.pages, p)
+	bm.mu.Unlock()
+
 	// 锁定页面视口为标准 1440x900 宽屏，确保无论在何种操作系统或分辨率下，页面 DOM 布局均完全一致且不折叠
 	_ = p.SetViewport(&proto.EmulationSetDeviceMetricsOverride{
 		Width:             defaultWindowWidth,
@@ -114,10 +150,23 @@ func (bm *BrowserManager) Close() error {
 	bm.mu.Lock()
 	defer bm.mu.Unlock()
 
-	if bm.browser != nil {
-		err := bm.browser.Close()
-		bm.browser = nil
-		return err
+	// 先关闭本服务自己打开的页面，避免在用户浏览器里留下残留标签页
+	for _, p := range bm.pages {
+		_ = p.Close()
 	}
-	return nil
+	bm.pages = nil
+
+	if bm.browser == nil {
+		return nil
+	}
+
+	// 外部复用的浏览器只断开连接，绝不关闭用户正在使用的浏览器进程
+	if bm.external {
+		bm.browser = nil
+		return nil
+	}
+
+	err := bm.browser.Close()
+	bm.browser = nil
+	return err
 }
