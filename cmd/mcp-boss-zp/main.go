@@ -60,7 +60,7 @@ func main() {
 		os.Exit(0)
 	}()
 
-	bossService := boss.NewBossService(bm)
+	bossService := boss.NewBossService(bm, boss.NewGuard(cfg))
 	srv := mcpServer.NewServer(bossService, Version)
 
 	stdioServer := server.NewStdioServer(srv.GetMCPServer())

@@ -135,7 +135,14 @@ func (bm *BrowserManager) NewStealthPage() (*rod.Page, error) {
 	bm.pages = append(bm.pages, p)
 	bm.mu.Unlock()
 
-	// 锁定页面视口为标准 1440x900 宽屏，确保无论在何种操作系统或分辨率下，页面 DOM 布局均完全一致且不折叠
+	// 接管用户已在使用的浏览器时不能强行覆盖视口：
+	// Emulation 会让 innerWidth/innerHeight 与真实 outerWidth/outerHeight 互相矛盾，反而成为自动化痕迹。
+	if bm.IsExternal() {
+		log.Println("[Browser] 接管模式：保持真实窗口尺寸，不做视口覆盖")
+		return p, nil
+	}
+
+	// 自启动模式下锁定页面视口为标准 1440x900 宽屏，确保页面 DOM 布局完全一致且不折叠
 	_ = p.SetViewport(&proto.EmulationSetDeviceMetricsOverride{
 		Width:             defaultWindowWidth,
 		Height:            defaultWindowHeight,
@@ -143,6 +150,13 @@ func (bm *BrowserManager) NewStealthPage() (*rod.Page, error) {
 	})
 
 	return p, nil
+}
+
+// IsExternal 是否处于接管已运行浏览器的模式
+func (bm *BrowserManager) IsExternal() bool {
+	bm.mu.Lock()
+	defer bm.mu.Unlock()
+	return bm.external
 }
 
 // Close 优雅关闭浏览器进程

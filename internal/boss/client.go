@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand"
 	"regexp"
 	"strings"
 	"sync"
@@ -28,13 +29,25 @@ const (
 )
 
 type BossService struct {
-	bm   *browser.BrowserManager
-	page *rod.Page
-	mu   sync.Mutex
+	bm    *browser.BrowserManager
+	guard *Guard
+	page  *rod.Page
+	mu    sync.Mutex
 }
 
-func NewBossService(bm *browser.BrowserManager) *BossService {
-	return &BossService{bm: bm}
+func NewBossService(bm *browser.BrowserManager, guard *Guard) *BossService {
+	return &BossService{bm: bm, guard: guard}
+}
+
+// isSecurityPage 判断当前是否被 BOSS 风控带到安全验证页
+func isSecurityPage(u string) bool {
+	if u == "" {
+		return false
+	}
+	lower := strings.ToLower(u)
+	return strings.Contains(lower, "_security_check") ||
+		strings.Contains(lower, "safe/verify") ||
+		strings.Contains(lower, "/security-check")
 }
 
 // ensurePageValid 确保 BOSS 直聘页面有效且处于可用状态
@@ -43,7 +56,11 @@ func (s *BossService) ensurePageValid() (*rod.Page, error) {
 	defer s.mu.Unlock()
 
 	if s.page != nil {
-		if _, err := s.page.Info(); err == nil {
+		info, err := s.page.Info()
+		if err == nil {
+			if isSecurityPage(info.URL) {
+				return nil, s.registerSecurityCheck()
+			}
 			return s.page, nil
 		}
 		log.Println("[BossService] 检测到 BOSS 标签页已关闭或失联，正在重新打开...")
@@ -67,6 +84,10 @@ func (s *BossService) ensurePageValid() (*rod.Page, error) {
 		return nil, fmt.Errorf("获取页面信息失败: %w", err)
 	}
 
+	if isSecurityPage(info.URL) {
+		return nil, s.registerSecurityCheck()
+	}
+
 	if strings.Contains(info.URL, "/web/user") || strings.Contains(info.URL, "login") {
 		log.Println("==================================================================")
 		log.Println("【BOSS直聘 MCP】检测到您尚未登录或登录已失效！")
@@ -84,6 +105,9 @@ func (s *BossService) ensurePageValid() (*rod.Page, error) {
 				return nil, fmt.Errorf("等待扫码登录超时 (3分钟)，请重启服务重新扫码")
 			case <-ticker.C:
 				currentInfo, err := s.page.Info()
+				if err == nil && isSecurityPage(currentInfo.URL) {
+					return nil, s.registerSecurityCheck()
+				}
 				if err == nil && !strings.Contains(currentInfo.URL, "/web/user") && !strings.Contains(currentInfo.URL, "login") {
 					log.Println("【BOSS直聘 MCP】检测到登录成功！会话已自动持久化。")
 					return s.page, nil
@@ -115,8 +139,12 @@ func (s *BossService) executeInPage(jsFn string, args ...any) (string, error) {
 		if !isContextLost(err) {
 			return "", err
 		}
+		// 若重定向后已落到安全验证页，立即停手，绝不反复冲击验证页
+		if info, infoErr := page.Info(); infoErr == nil && isSecurityPage(info.URL) {
+			return "", s.registerSecurityCheck()
+		}
 		_ = page.WaitLoad()
-		time.Sleep(600 * time.Millisecond)
+		time.Sleep(humanJitter(400, 900))
 	}
 
 	return "", lastErr
@@ -133,12 +161,58 @@ func isContextLost(err error) bool {
 		strings.Contains(msg, "Execution context was destroyed")
 }
 
+// humanJitter 返回 [minMs, maxMs] 区间内的随机延迟，避免固定节奏
+func humanJitter(minMs, maxMs int) time.Duration {
+	if maxMs <= minMs {
+		return time.Duration(minMs) * time.Millisecond
+	}
+	return time.Duration(minMs+rand.Intn(maxMs-minMs+1)) * time.Millisecond
+}
+
+// registerSecurityCheck 记录一次安全验证并进入冷却
+func (s *BossService) registerSecurityCheck() error {
+	if s.guard == nil {
+		return fmt.Errorf("页面跳转到 BOSS 安全验证，请手动完成验证后重试")
+	}
+	return s.guard.RegisterSecurityCheck()
+}
+
+// moveMouseHuman 用分段插值 + 轻微抖动模拟人工鼠标移动，最后停顿再点击
+func (s *BossService) moveMouseHuman(page *rod.Page, target proto.Point) {
+	start := proto.NewPoint(
+		target.X+float64(rand.Intn(241)-120),
+		target.Y+float64(rand.Intn(161)-80),
+	)
+	steps := 3 + rand.Intn(2)
+	for i := 1; i <= steps; i++ {
+		t := float64(i) / float64(steps)
+		eased := t * t * (3 - 2*t) // ease-in-out
+		x := start.X + (target.X-start.X)*eased + float64(rand.Intn(5)-2)
+		y := start.Y + (target.Y-start.Y)*eased + float64(rand.Intn(5)-2)
+		if x < 1 {
+			x = 1
+		}
+		if y < 1 {
+			y = 1
+		}
+		_ = page.Mouse.MoveTo(proto.NewPoint(x, y))
+		time.Sleep(humanJitter(12, 35))
+	}
+	time.Sleep(humanJitter(120, 320))
+}
+
 // GetVisibleJobs 读取当前页面上渲染的可见职位列表
 func (s *BossService) GetVisibleJobs(ctx context.Context) ([]VisibleJob, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	default:
+	}
+
+	if s.guard != nil {
+		if err := s.guard.Check(); err != nil {
+			return nil, err
+		}
 	}
 
 	rawJSON, err := s.executeInPage(bossScript, "getJobs")
@@ -186,6 +260,12 @@ func (s *BossService) GreetJob(ctx context.Context, cardIndex int) (*GreetResult
 		return nil, fmt.Errorf("卡片序号必须从 1 开始")
 	}
 
+	if s.guard != nil {
+		if err := s.guard.Check(); err != nil {
+			return nil, err
+		}
+	}
+
 	page, err := s.ensurePageValid()
 	if err != nil {
 		return nil, err
@@ -223,20 +303,33 @@ func (s *BossService) GreetJob(ctx context.Context, cardIndex int) (*GreetResult
 	}
 
 	// 5. 真实物理鼠标点击【立即沟通】
+	// 点击前先做频率/配额检查，避免"读了页面却打不出去"或反向的无效计数
+	if s.guard != nil {
+		if err := s.guard.BeforeGreet(); err != nil {
+			return nil, err
+		}
+	}
+
 	// 通过 Shape 计算物理中心坐标并直接触发鼠标事件，跳过 Rod 默认的 WaitInteractable 遮挡死循环
 	if shape, err := btn.Shape(); err == nil && shape != nil {
 		box := shape.Box()
 		centerPt := proto.NewPoint(box.X+box.Width/2, box.Y+box.Height/2)
-		_ = page.Mouse.MoveTo(centerPt)
+		s.moveMouseHuman(page, centerPt)
 		if err := page.Mouse.Click(proto.InputMouseButtonLeft, 1); err != nil {
 			log.Printf("[BossService] 物理鼠标点击异常 (%v)，使用 DOM 兜底触发", err)
-			_, _ = page.Eval(`(el) => el.click()`, btn)
+			if _, domErr := page.Eval(`(el) => el.click()`, btn); domErr != nil {
+				return nil, fmt.Errorf("点击【立即沟通】按钮失败: %w", domErr)
+			}
 		}
 	} else {
 		// 兜底方案：直接通过 DOM click 触发
 		if _, err := page.Eval(`(el) => el.click()`, btn); err != nil {
 			return nil, fmt.Errorf("点击【立即沟通】按钮失败: %w", err)
 		}
+	}
+
+	if s.guard != nil {
+		s.guard.AfterGreet()
 	}
 
 	return &GreetResult{
