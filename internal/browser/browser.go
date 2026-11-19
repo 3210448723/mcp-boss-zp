@@ -74,7 +74,9 @@ func (bm *BrowserManager) EnsureBrowser() (*rod.Browser, error) {
 		if err != nil {
 			return nil, fmt.Errorf("解析 CDP 地址失败 (%s): %w", bm.cfg.CDPURL, err)
 		}
-		b := rod.New().ControlURL(u)
+		// NoDefaultDevice：rod 默认会向附着的每个标签页应用 LaptopWithMDPIScreen(1280x800@1x)
+		// 设备仿真，把用户标签页的视口锁死在半屏——必须禁用
+		b := rod.New().ControlURL(u).NoDefaultDevice()
 		if err := b.Connect(); err != nil {
 			return nil, fmt.Errorf("连接已运行的浏览器失败 (请确认浏览器以 --remote-debugging-port 启动且端口可达): %w", err)
 		}
@@ -113,7 +115,7 @@ func (bm *BrowserManager) EnsureBrowser() (*rod.Browser, error) {
 		return nil, fmt.Errorf("启动 Chrome 失败 (请确认本机已安装 Chrome/Edge): %w", err)
 	}
 
-	b := rod.New().ControlURL(u)
+	b := rod.New().ControlURL(u).NoDefaultDevice()
 	if err := b.Connect(); err != nil {
 		return nil, fmt.Errorf("连接浏览器失败: %w", err)
 	}
@@ -199,17 +201,24 @@ func (bm *BrowserManager) FitWindow(p *rod.Page) {
 
 	// 首选系统层最大化：真实窗口铺满后页面布局自然正确
 	if bm.cfg.MaximizeWindow {
-		if HostWindowMaximized() {
-			log.Println("[Browser] Edge 窗口已处于最大化状态，跳过视口覆盖")
+		wasMax := HostWindowMaximized()
+		if !wasMax && MaximizeHostWindow() {
+			log.Println("[Browser] 已最大化 Edge 窗口，页面随窗口铺满屏幕")
+		}
+		// 最大化后复查内容区：正常则收工；仍严重偏小说明标签页残留第三方视口覆盖，落入兜底
+		cur, curOK := bm.readMetrics(p)
+		if curOK && cur.ScreenW > 0 && float64(cur.InnerW) >= float64(cur.ScreenW)*0.6 {
+			if wasMax {
+				log.Println("[Browser] Edge 窗口已处于最大化状态，跳过视口覆盖")
+			}
 			return
 		}
-		if MaximizeHostWindow() {
-			log.Println("[Browser] 已最大化 Edge 窗口，页面随窗口铺满屏幕")
-			return
+		if curOK && cur.ScreenW > 0 {
+			log.Printf("[Browser] 窗口已最大化但内容区仍偏小 (inner=%d, screen=%d)，走视口归一化兜底", cur.InnerW, cur.ScreenW)
 		}
 	}
 
-	// 兜底：窗口无法最大化时才使用视口覆盖
+	// 兜底：窗口无法最大化、或标签页残留第三方视口覆盖时使用
 	bm.NormalizeViewport(p)
 }
 
