@@ -25,7 +25,7 @@ var (
 )
 
 const (
-	bossJobURL = "https://www.zhipin.com/web/geek/job"
+	bossJobURL = "https://www.zhipin.com/web/geek/jobs"
 )
 
 type BossService struct {
@@ -50,11 +50,20 @@ func isSecurityPage(u string) bool {
 		strings.Contains(lower, "/security-check")
 }
 
-// ensurePageValid 确保 BOSS 直聘页面有效且处于可用状态
-func (s *BossService) ensurePageValid() (*rod.Page, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// isLoggedIn 检查指定页面是否处于已登录状态（若 URL 包含 /web/user 则视为未登录）
+func isLoggedIn(p *rod.Page) (bool, error) {
+	info, err := p.Info()
+	if err != nil {
+		return false, err
+	}
+	if strings.Contains(info.URL, "/web/user") {
+		return false, nil
+	}
+	return true, nil
+}
 
+// getOrOpenPageLocked 获取或创建页面。若标签页已关闭或失联则重新打开并导航至推荐页
+func (s *BossService) getOrOpenPageLocked() (*rod.Page, error) {
 	if s.page != nil {
 		info, err := s.page.Info()
 		if err == nil {
@@ -79,18 +88,32 @@ func (s *BossService) ensurePageValid() (*rod.Page, error) {
 	// 只有当前不在推荐页时才导航，复用标签页时避免多余刷新
 	currentInfo, err := s.page.Info()
 	if err != nil || !strings.Contains(currentInfo.URL, "/web/geek/job") {
+		wait := s.page.Timeout(10 * time.Second).WaitNavigation(proto.PageLifecycleEventNameNetworkAlmostIdle)
 		log.Printf("[BossService] 正在打开 BOSS 直聘推荐页: %s", bossJobURL)
 		if err := s.page.Navigate(bossJobURL); err != nil {
 			return nil, fmt.Errorf("页面导航失败: %w", err)
 		}
-		_ = s.page.WaitLoad()
+		wait()
 	}
 
 	// 窗口/视口修正必须放在加载完成之后：导航会重置 Emulation 覆盖
 	// 注意该便携 Edge 的真实 OS 窗口会被锁在 1280x800，必须走系统层最大化
 	s.bm.FitWindow(s.page)
 
-	info, err := s.page.Info()
+	return s.page, nil
+}
+
+// ensurePageValid 确保 BOSS 直聘处于有效登录状态，未登录时立即返回错误
+func (s *BossService) ensurePageValid() (*rod.Page, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	p, err := s.getOrOpenPageLocked()
+	if err != nil {
+		return nil, err
+	}
+
+	info, err := p.Info()
 	if err != nil {
 		return nil, fmt.Errorf("获取页面信息失败: %w", err)
 	}
@@ -127,8 +150,29 @@ func (s *BossService) ensurePageValid() (*rod.Page, error) {
 		}
 	}
 
-	log.Println("[BossService] BOSS 直聘已处于有效登录状态。")
-	return s.page, nil
+	return p, nil
+}
+
+// CheckLoginStatus 检查 BOSS 直聘当前登录状态
+func (s *BossService) CheckLoginStatus(ctx context.Context) (bool, string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	p, err := s.getOrOpenPageLocked()
+	if err != nil {
+		return false, "", err
+	}
+
+	logged, err := isLoggedIn(p)
+	if err != nil {
+		return false, "", fmt.Errorf("获取页面信息失败: %w", err)
+	}
+
+	if !logged {
+		return false, "尚未登录 BOSS 直聘，当前处于登录界面", nil
+	}
+
+	return true, "已登录 BOSS 直聘，当前会话有效且就绪", nil
 }
 
 // executeInPage 在 BOSS 页面上下文中执行脚本并返回字符串

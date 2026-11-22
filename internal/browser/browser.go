@@ -6,7 +6,6 @@ import (
 	"log"
 	"math"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -36,13 +35,6 @@ type BrowserManager struct {
 func NewBrowserManager(cfg *config.AppConfig) *BrowserManager {
 	return &BrowserManager{
 		cfg: cfg,
-	}
-}
-
-// cleanStaleLocks 清理崩溃残留的 Chrome 锁文件
-func cleanStaleLocks(userDataDir string) {
-	for _, f := range []string{"SingletonLock", "SingletonSocket", "SingletonCookie"} {
-		_ = os.Remove(filepath.Join(userDataDir, f))
 	}
 }
 
@@ -89,8 +81,6 @@ func (bm *BrowserManager) EnsureBrowser() (*rod.Browser, error) {
 	if err := os.MkdirAll(bm.cfg.UserDataDir, 0755); err != nil {
 		return nil, fmt.Errorf("创建用户数据目录失败: %w", err)
 	}
-
-	cleanStaleLocks(bm.cfg.UserDataDir)
 
 	l := launcher.New().
 		UserDataDir(bm.cfg.UserDataDir).

@@ -12,7 +12,7 @@ type AppConfig struct {
 	UserDataDir     string // Chrome 用户数据目录
 	Headless        bool   // 是否无头模式
 	ChromeBin       string // 自定义 Chrome/Edge 可执行文件路径
-	CDPURL          string // 复用已运行浏览器的 CDP 地址 (如 http://127.0.0.1:9222)，为空则自行启动浏览器
+	CDPURL          string // 复用已运行浏览器的 CDP 地址 (BOSS_CDP_URL / CHROME_CDP_URL)，为空则自行启动浏览器
 	StateFile       string // 速率/配额/冷却状态的持久化文件
 	GreetMinSec     int    // 两次打招呼的最小间隔（秒）
 	GreetMaxSec     int    // 两次打招呼的最大间隔（秒）
@@ -24,9 +24,6 @@ type AppConfig struct {
 
 // GetDefaultUserDataDir 获取跨平台默认的数据持久化目录
 func GetDefaultUserDataDir() string {
-	if custom := os.Getenv("BOSS_USER_DATA_DIR"); custom != "" {
-		return custom
-	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		home = "."
@@ -79,11 +76,17 @@ func LoadConfig() *AppConfig {
 		maxSec = minSec
 	}
 
+	// CDP 地址：兼容本地变量 BOSS_CDP_URL 与上游变量 CHROME_CDP_URL（前者优先）
+	cdpURL := strings.TrimSpace(os.Getenv("BOSS_CDP_URL"))
+	if cdpURL == "" {
+		cdpURL = strings.TrimSpace(os.Getenv("CHROME_CDP_URL"))
+	}
+
 	return &AppConfig{
 		UserDataDir:     GetDefaultUserDataDir(),
 		Headless:        headless,
 		ChromeBin:       strings.TrimSpace(os.Getenv("CHROME_BIN")),
-		CDPURL:          strings.TrimSpace(os.Getenv("BOSS_CDP_URL")),
+		CDPURL:          cdpURL,
 		StateFile:       GetDefaultStateFile(),
 		GreetMinSec:     minSec,
 		GreetMaxSec:     maxSec,
